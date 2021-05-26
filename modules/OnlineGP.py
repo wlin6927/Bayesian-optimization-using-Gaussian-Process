@@ -61,17 +61,19 @@ class OGP(object):
             self.covar = covar
             self.amplitude_covar = hyperparams['amplitude_covar'] #amplitude covariance
             self.noise_var = hyperparams['noise_variance'] # variance -- not stdev
-            cps = np.shape(hyperparams['precisionMatrix'])
+            cps = np.shape(hyperparams['scale'])
             if len(cps) == 2:
                 if cps[0] == cps[1]:
-                    self.precisionMatrix = hyperparams['precisionMatrix']
+                    print('Using precision matrix')
+                    self.precisionMatrix = hyperparams['scale']
                     self.lengthscales = np.array(np.diag(self.precisionMatrix)**(-0.5))
             elif len(cps) == 1:
-                    print('incorrect number of parameters detected in gp_precisionmat')
                     if cps[0]  == self.dim:
-                        print('assuming gp_precisionmat are lengthscales vector')
-                        self.lengthscales = hyperparams['precisionMatrix'] 
-                        self.precisionMatrix = np.array(np.diag(self.precisionMatrix)**(-2))
+                        print('Using lengthscales vector')
+                        self.lengthscales = hyperparams['scale'] 
+                        self.precisionMatrix = np.array(np.diag(self.lengthscales**(-2)))
+                    else:
+                        print('incorrect number or shape of parameters detected in scale')
         else:
             print('ERROR - OnlineGP: Unknown covariance function')
             raise

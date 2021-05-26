@@ -131,7 +131,7 @@ class BayesOpt:
         
         # make a copy of the initial params
         self.initial_hyperparams = {}
-        self.initial_hyperparams['precisionMatrix'] = np.diag(1./copy.copy(self.lengthscales)**2)
+        self.initial_hyperparams['scale'] = np.diag(1./copy.copy(self.lengthscales)**2)
         self.initial_hyperparams['noise_variance'] = copy.copy(self.model.noise_var) 
         self.initial_hyperparams['amplitude_covar'] = copy.copy(self.model.amplitude_covar)
         
@@ -139,7 +139,7 @@ class BayesOpt:
         self.hyperparams_opt_all = {}
         self.hyperparams_opt_all['noise_variance'] = [copy.copy(self.model.noise_var)]
         self.hyperparams_opt_all['amplitude_covar'] = [copy.copy(self.model.amplitude_covar)]
-        self.hyperparams_opt_all['precisionMatrix'] = [1./copy.copy(self.lengthscales)**2]
+        self.hyperparams_opt_all['scale'] = [1./copy.copy(self.lengthscales)**2]
         
         if self.verboseQ:
             print('Using prior mean function of ', self.model.prmean)
@@ -176,7 +176,7 @@ class BayesOpt:
     def sk_kernel(self, hypers_dict):
     
         amp = hypers_dict['amplitude_covar']
-        lengthscales = np.diag(hypers_dict['precisionMatrix'])**-0.5
+        lengthscales = np.diag(hypers_dict['scale'])**-0.5
         noise_var = hypers_dict['noise_variance']
         
         se_ard = Ck(amp)*RBF(length_scale=lengthscales, length_scale_bounds=(1e-6,10))
@@ -214,7 +214,7 @@ class BayesOpt:
 
         # make dict
         sk_hypers = {}
-        sk_hypers['precisionMatrix'] =  np.diag(1./(sk_ls**2)) 
+        sk_hypers['scale'] =  np.diag(1./(sk_ls**2)) 
         sk_hypers['noise_variance'] = sk_noise
         sk_hypers['amplitude_covar'] = sk_amp
 
@@ -235,7 +235,7 @@ class BayesOpt:
 
         # optimize kernel using SK learn from current hyperparams        
         self.current_hyperparams = {}
-        self.current_hyperparams['precisionMatrix'] = np.diag(1./self.model.lengthscales**2)
+        self.current_hyperparams['scale'] = np.diag(1./self.model.lengthscales**2)
         self.current_hyperparams['noise_variance'] = self.model.noise_var
         self.current_hyperparams['amplitude_covar'] = self.model.amplitude_covar
                                     
@@ -250,7 +250,7 @@ class BayesOpt:
             
         
         for key in hyperparams_opt:
-            if key == 'precisionMatrix':
+            if key == 'scale':
                 self.hyperparams_opt_all[key] = np.array(list(chain(self.hyperparams_opt_all[key],                            [hyperparams_opt[key].diagonal()]))) 
             else:
                 self.hyperparams_opt_all[key] = list(chain(self.hyperparams_opt_all[key], [hyperparams_opt[key]]))
@@ -532,7 +532,7 @@ def negProbImprove(x_new, model, y_best, xi):
     else:
         Z = diff / np.sqrt(y_var)
 
-    return -norm.cdf(Z)
+    return -norm.cdf(Z).ravel()
 
 def negExpImprove(x_new, model, y_best, xi,alpha = 1.0):
     """
@@ -551,7 +551,7 @@ def negExpImprove(x_new, model, y_best, xi,alpha = 1.0):
         Z = diff / np.sqrt(y_var)
 
     EI = diff * norm.cdf(Z) + np.sqrt(y_var) * norm.pdf(Z)
-    return alpha * (-EI) + (1. - alpha) * (-y_mean)
+    return (alpha * (-EI) + (1. - alpha) * (-y_mean)).ravel()
 
 
 def negUCB(x_new, model, ndim, nsteps, nu = 1., delta = 1.):
@@ -583,6 +583,6 @@ def negUCB(x_new, model, ndim, nsteps, nu = 1., delta = 1.):
         tau = 2.*np.log(nsteps**(0.5*ndim+2.)*(np.pi**2.)/3./delta)
         GPUCB = y_mean + np.sqrt(nu * tau * y_var)
 
-    return -GPUCB
+    return -GPUCB.ravel()
 
 
