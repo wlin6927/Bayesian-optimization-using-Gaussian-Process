@@ -26,15 +26,46 @@ def my_queue_get(queue, block=True, timeout=None):
 try:
     
     from scipy.optimize import minimize
+    import nlopt
     
     def mworker(f,x0,fargs,margs,out_q):
         # worker invoked in a process puts the results in the output queue out_q
     #    f,x0,fargs,margs = args
         #print 'worker: fargs = ',fargs
         #print 'worker: margs = ',margs
-        res = minimize(f, x0, args = fargs, **margs)
-        #return [res.x, res.fun]
-        out_q.put([[res.x, res.fun[0]]])
+        if margs['method'] in ['nelder-mead', 'powell', 'l-bfgs-b', 'trust-constr','nelder-mead+lbfgs', 'powell+lbfgs', 'l-bfgs-b+lbfgs','trust-constr+lbfgs',]:
+            res = minimize(f, x0, args = fargs, **margs)
+            out_q.put([[res.x, res.fun]])
+            #return [res.x, res.fun]
+        elif margs['method'] in ['direct', 'direct+lbfgs']:
+            bounds = margs['bounds']
+            nlopt.srand(0)
+            opt = nlopt.opt(nlopt.GN_DIRECT_L_RAND,bounds.shape[0])
+            opt.set_lower_bounds(bounds[:, 0])
+            opt.set_upper_bounds(bounds[:, 1])
+            opt.set_maxeval(margs['maxiter'])
+            
+            def util_func(params,grad=None):
+                func_value = f(params, *fargs)
+                if np.iterable(func_value):
+                    return func_value[0]
+                else:
+                    return func_value
+            opt.set_min_objective(util_func)
+            x_best = opt.optimize(x0)
+            out_q.put([[x_best, util_func(x_best)]])
+        elif margs['method'] in ['random', 'random+lbfgs']:
+            bounds = margs['bounds']
+            x_best = x0
+            f_opt = f(x_best, *fargs)
+            for _ in range(margs['maxiter']):
+                x_trial = np.random.uniform(size=bounds.shape[0]) \
+                * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+                f_trial = f(x_trial, *fargs)
+                if f_trial < f_opt:
+                    f_opt = f_trial
+                    x_best = x_trial
+            out_q.put([[x_best, f_opt]])
 
     # parallelize minimizations using different starting positions using multiprocessing, scipy.optimize.minimize
     def parallelminimize(f,x0s,fargs,margs,v0best=None,relative_bounds=None):
@@ -337,7 +368,7 @@ try:
     def eworker(f,x,fargs,out_q):
         # worker invoked in a process puts the results in the output queue out_q
         res = f(x, *fargs)
-        out_q.put(np.hstack((x, res[0])))
+        out_q.put(np.hstack((x, res)))
 
     # eval function over a range of initial points neval and return the nkeep lowest function evals
     def parallelgridsearch(f,x0,lengths,fargs,neval,nkeep):

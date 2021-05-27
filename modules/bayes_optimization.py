@@ -7,6 +7,7 @@ import numpy as np
 from scipy.optimize import minimize
 from sklearn.utils import check_random_state
 # from scipy.optimize import approx_fprime
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel as Ck, WhiteKernel
 from modules.OnlineGP import OGP
@@ -43,7 +44,7 @@ class BayesOpt:
         update the model.
     """
     
-    def __init__(self, model, target_func, acq_func='EI', init_sample=20, xi=0.0, alt_param=-1, m=200, bounds=None, iter_bound=False, prior_data=None, start_dev_vals=None, dev_ids=None, searchBoundScaleFactor=None, optimize_kernel_on_the_fly = None, verboseQ=False):
+    def __init__(self, model, target_func, acq_func='EI', init_sample=20, useContext=False, optmethod='l-bfgs-b', xi=0.0, alt_param=-1, m=200, bounds=None, iter_bound=False, prior_data=None, start_dev_vals=None, dev_ids=None, searchBoundScaleFactor=None, optimize_kernel_on_the_fly = None, verboseQ=False):
         """        
         Initialization parameters:
         --------------------------
@@ -83,6 +84,7 @@ class BayesOpt:
         self.model = model
         self.m = m
         self.bounds = bounds
+        self.optmethod = optmethod
         self.searchBoundScaleFactor = 1.
         if type(searchBoundScaleFactor) is not type(None):
             try:
@@ -99,11 +101,12 @@ class BayesOpt:
             self.mi = self.target_func.mi
         except:
             self.mi = self.target_func
+        self.useContext = useContext
         self.init_sample = init_sample
         self.acq_func = (acq_func, xi, alt_param)
         #self.ucb_params = [0.24, 0.4] # [nu,delta] worked well for LCLS
         self.ucb_params = [2., None] # if we want to used a fixed scale factor of the standard deviation
-        self.max_iter = 100
+        self.max_iter = 1000
         self.alpha = 1.0 #control the ratio of exploration to exploitation in AI acuisition function
         self.kill = False
         self.ndim = np.array(start_dev_vals).size
@@ -112,6 +115,9 @@ class BayesOpt:
         self.start_dev_vals = start_dev_vals
         self.pvs = self.dev_ids
         self.rng = check_random_state(42)
+        
+        #self.x_scaler = StandardScaler()
+        #self.y_scaler = StandardScaler()
 
         try:
             # get initial state
@@ -120,14 +126,17 @@ class BayesOpt:
             print('x_init',x_init)
             print('y_init',y_init)
             self.X_obs = np.array(x_init)
-            self.Y_obs = [y_init]
-            self.current_x = np.array(np.array(x_init).flatten(), ndmin=2)
+            self.Y_obs = np.array(y_init)
+            #self.X_scaled = self.x_scaler.fit_transform(np.asarray(self.X_obs))
+            #self.Y_scaled = self.y_scaler.fit_transform(np.asarray(self.Y_obs).reshape(-1, 1))
+            self.current_x = np.array(np.array(x_init).flatten()[0:self.ndim], ndmin=2)
+            print('current_x',self.current_x)
         except:
             print('BayesOpt - ERROR: Could not grab initial machine state')
         
-        # calculate length scales
+        # calculate input length scales
         try:
-            self.lengthscales = self.model.lengthscales
+            self.lengthscales = self.model.input_ls
         except:
             print('WARNING - GP.bayesian_optimization.BayesOpt: Using some unit length scales cause we messed up somehow...')
             self.lengthscales = np.ones(len(self.dev_ids))
@@ -311,7 +320,7 @@ class BayesOpt:
             self.model.update(x_new, y_new)
 
             
-    def OptIter(self,pause=0):
+    def OptIter(self,time=0,pause=0):
         """
         runs the optimizer for one iteration
         """
@@ -321,7 +330,11 @@ class BayesOpt:
                 x_next = self.rng.uniform(size=self.bounds.shape[0])                   * (self.bounds[:, 1] - self.bounds[:, 0]) + self.bounds[:, 0]
             else:
             # get next point to try using acquisition function
-                x_next = self.acquire()
+                if self.useContext:
+                    c = self.mi.getContext(time)
+                    x_next = self.acquire(context = c)
+                else:
+                    x_next = self.acquire(context = None)
                 if(self.acq_func[0] == 'testEI'):
                     ind = x_next
                     x_next = np.array(self.acq_func[2].iloc[ind,:-1],ndmin=2)
@@ -336,11 +349,18 @@ class BayesOpt:
         if(self.acq_func[0] == 'testEI'):
             (x_new, y_new) = (x_next, self.acq_func[2].iloc[ind,-1])
         else:
-            (x_new, y_new) = self.mi.getState()
+            (x_new, y_new) = self.mi.getState(time+1)
         # add new entry to observed data
         self.X_obs = np.concatenate((self.X_obs,x_new),axis=0)
-        self.Y_obs.append(y_new)
+        self.Y_obs = np.concatenate((self.Y_obs,y_new),axis=0)
         
+        #self.x_scaler = StandardScaler()
+        #self.y_scaler = StandardScaler()
+        #self.X_scaled = self.x_scaler.fit_transform(np.asarray(self.X_obs))
+        #self.Y_scaled = self.y_scaler.fit_transform(np.asarray(self.Y_obs).reshape(-1, 1))
+        
+        #x_new = self.x_scaler.transform(x_new)
+        #y_new = self.y_scaler.transform(y_new)
         # update the model (may want to add noise if using testEI)
         self.model.update(x_new, y_new)# + .5*np.random.randn())
             
@@ -375,16 +395,16 @@ class BayesOpt:
         Not needed for UCB so do it the fast way (return max obs)
         """
         if(self.acq_func[0] == 'UCB'):
-            mu = self.Y_obs
+            mu = self.Y_obs.ravel()
         else:
             (mu, var) = self.model.predict(self.X_obs)
             mu = [self.model.predict(np.array(x,ndmin=2))[0] for x in self.X_obs]
 
         (ind_best, mu_best) = max(enumerate(mu), key=op.itemgetter(1))
-        return (self.X_obs[ind_best], mu_best)
+        return (self.X_obs[ind_best][0:self.ndim], mu_best)
 
     
-    def acquire(self):
+    def acquire(self, context=None):
         """
         Computes the next point for the optimizer to try by maximizing
         the acquisition function. If movement per iteration is bounded,
@@ -393,7 +413,7 @@ class BayesOpt:
         # look from best positions
         (x_best, y_best) = self.best_seen()
         self.x_best = x_best
-        x_curr = self.current_x[-1]
+        x_curr = self.current_x[-1][0:self.ndim]
         x_start = x_best
             
         ndim = x_curr.size # dimension of the feature space we're searching NEEDED FOR UCB
@@ -417,7 +437,7 @@ class BayesOpt:
             iter_bounds = self.bounds
   
         # options for finding the peak of the acquisition function:
-        optmethod = 'L-BFGS-B' # L-BFGS-B, BFGS, TNC, and SLSQP allow bounds whereas Powell and COBYLA don't
+        optmethod = self.optmethod # L-BFGS-B, BFGS, TNC, and SLSQP allow bounds whereas Powell and COBYLA don't
         maxiter = 1000 # max number of steps for one scipy.optimize.minimize call
         try:
             nproc = mp.cpu_count() # number of processes to launch minimizations on
@@ -443,7 +463,7 @@ class BayesOpt:
         # gaussian process upper confidence bound acquisition function
         elif(self.acq_func[0] == 'UCB'):
             aqfcn = negUCB
-            fargs = (self.bounds, self.model, ndim, nsteps, self.ucb_params[0], self.ucb_params[1])
+            fargs = (context, self.bounds, y_best, self.model, ndim, nsteps, self.ucb_params[0], self.ucb_params[1])
 
         # maybe something mitch was using once? (can probably remove)
         elif(self.acq_func[0] == 'testEI'):
@@ -478,7 +498,7 @@ class BayesOpt:
                 nbest = 3 # add the best points seen so far (largest Y_obs)
                 nstart = 2 # make sure some starting points are there to prevent run away searches
                 
-                yobs = np.array([y[0][0] for y in self.Y_obs])
+                yobs = np.array([y[0] for y in self.Y_obs])
                 isearch = yobs.argsort()[-nbest:]
                 for i in range(min(nstart,len(self.Y_obs))): #
                     if np.sum(isearch == i) == 0: # not found in list
@@ -492,7 +512,7 @@ class BayesOpt:
 #                 parallelgridsearch generates pseudo-random grid, then performs an ICDF transform
 #                 to map to multinormal distrinbution centered on x_start and with widths given by hyper params
 #                 """
-                    vs = parallelgridsearch(aqfcn,self.X_obs[i],self.searchBoundScaleFactor * 0.6*self.lengthscales,fargs,neval,nkeep)
+                    vs = parallelgridsearch(aqfcn,self.X_obs[i,0:self.ndim],self.searchBoundScaleFactor * 0.6*self.lengthscales,fargs,neval,nkeep)
                                       
                     if type(v0s) == type(None):
                         v0s = copy.copy(vs)
@@ -512,7 +532,10 @@ class BayesOpt:
                 
                 else:
                     # use minimize
-                    mkwargs = dict(bounds=iter_bounds, method=optmethod, options={'maxiter':maxiter}, tol=tolerance) # keyword args for scipy.optimize.minimize
+                    if optmethod in ['nelder-mead', 'powell', 'l-bfgs-b', 'trust-constr','nelder-mead+lbfgs', 'powell+lbfgs', 'l-bfgs-b+lbfgs','trust-constr+lbfgs',]:
+                        mkwargs = dict(bounds=iter_bounds, method=optmethod, options={'maxiter':maxiter}, tol=tolerance) # keyword args for scipy.optimize.minimize
+                    else:
+                        mkwargs = dict(bounds=iter_bounds, method=optmethod, maxiter=maxiter) #keyword args for nlopt minimizer
                     res = parallelminimize(aqfcn,x0s,fargs,mkwargs,v0best,relative_bounds=relative_bounds)
 
             else: # single-processing
@@ -566,7 +589,7 @@ def negExpImprove(x_new, model, y_best, xi,alpha = 1.0):
     return (alpha * (-EI) + (1. - alpha) * (-y_mean)).ravel()
 
 
-def negUCB(x_new, bounds, model, ndim, nsteps, nu = 1., delta = 1.):
+def negUCB(x_new, context, bounds, y_best, model, ndim, nsteps, nu = 1., delta = 1.):
     """
     GPUCB: Gaussian process upper confidence bound aquisition function
     Default nu and delta hyperparameters theoretically yield "least regret".
@@ -588,14 +611,19 @@ def negUCB(x_new, bounds, model, ndim, nsteps, nu = 1., delta = 1.):
 
     if nsteps==0: nsteps += 1
     if not np.all(np.logical_and(x_new >= np.array(bounds)[:, 0],                            x_new <= np.array(bounds)[:, 1])):
-        return np.array([np.inf])
-    (y_mean, y_var) = model.predict(np.array(x_new,ndmin=2))
-#     print('(y_mean, y_var) = ',(y_mean, y_var))
+        return np.inf
+    if context is not None:
+        xfull_new = np.concatenate((x_new.reshape((ndim,)),context))
+        (y_mean, y_var) = model.predict(np.array(xfull_new,ndmin=2))
+    else:
+        #x_new = x_scaler.transform(np.array(x_new,ndmin=2))
+        (y_mean, y_var) = model.predict(np.array(x_new,ndmin=2))
+#       print('(y_mean, y_var) = ',(y_mean, y_var))
     if delta is None:
-        GPUCB = y_mean + nu * np.sqrt(y_var)
+        GPUCB = (y_mean - y_best) + nu * np.sqrt(y_var)
     else:
         tau = 2.*np.log(nsteps**(0.5*ndim+2.)*(np.pi**2.)/3./delta)
-        GPUCB = y_mean + np.sqrt(nu * tau * y_var)
+        GPUCB = (y_mean - y_best) + np.sqrt(nu * tau * y_var)
 
     return -GPUCB.ravel()
 

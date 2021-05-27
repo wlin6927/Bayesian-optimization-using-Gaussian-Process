@@ -20,7 +20,7 @@ class OGP(object):
         deleteBV(index): Removes the selected BV from the GP and updates to minimize
             the (either weighted or unweighted) KL divergence-cost of the removal
     """
-    def __init__(self, dim, hyperparams, covar = ['RBF','MATERN32','MATERN52','x2','booth'][0], maxBV=200, bias = None,
+    def __init__(self, input_dim, active_dim, hyperparams, covar = ['RBF','MATERN32','MATERN52','x2','booth'][0], maxBV=200, bias = None,
                  prmean=None, prmeanp=None, prvar=None, prvarp=None, proj=True, weighted=False, thresh=1e-6, sparsityQ = True, verboseQ=False):
         """
         Initialization parameters:
@@ -48,7 +48,8 @@ class OGP(object):
         verboseQ: printing         
         """
          
-        self.dim = dim
+        self.input_dim = input_dim
+        self.active_dim = active_dim
         self.maxBV = maxBV
         self.numBV = 0
         self.proj = proj
@@ -56,6 +57,15 @@ class OGP(object):
         self.sparsityQ = sparsityQ
         self.verboseQ = verboseQ
         self.nupdates = 0
+        
+        #whether use contextual BO or not
+        if self.active_dim == self.input_dim:
+            print('No context, normal BO: input_dim -',self.input_dim)
+            self.use_context = False
+        else:
+            print('Contextual BO: input_dim -',self.input_dim,'context_dim -',self.active_dim - self.input_dim)
+            self.use_context = True
+            self.context_dim = self.active_dim - self.input_dim
 
         if (covar in ['RBF','MATERN32','MATERN52','x2','booth']):
             self.covar = covar
@@ -68,10 +78,21 @@ class OGP(object):
                     self.precisionMatrix = hyperparams['scale']
                     self.lengthscales = np.array(np.diag(self.precisionMatrix)**(-0.5))
             elif len(cps) == 1:
-                    if cps[0]  == self.dim:
+                    if cps[0]  == self.active_dim:
                         print('Using lengthscales vector')
                         self.lengthscales = hyperparams['scale'] 
                         self.precisionMatrix = np.array(np.diag(self.lengthscales**(-2)))
+                        if self.use_context:
+                            print('Contextual GP')
+                            self.input_ls = self.lengthscales[0:input_dim]
+                            self.context_ls = self.lengthscales[input_dim:]
+                            self.input_amp = self.amplitude_covar[0]
+                            self.context_amp = self.amplitude_covar[1]
+                        else:
+                            self.input_ls = self.lengthscales
+                            self.context_ls = None
+                            self.input_amp = self.amplitude_covar
+                            self.context_amp = None
                     else:
                         print('incorrect number or shape of parameters detected in scale')
         else:
@@ -86,7 +107,7 @@ class OGP(object):
         self.prvar = prvar; self.prvarp = prvarp
 
         # initialize model state
-        self.BV = np.zeros(shape=(0,self.dim))
+        self.BV = np.zeros(shape=(0,self.active_dim))
         self.alpha = np.zeros(shape=(0,1))
         self.C = np.zeros(shape=(0,0))
 
@@ -394,16 +415,64 @@ class OGP(object):
             K = (Kx+2*Ky)**2 + (Ky+2*Kx)**2
             
         elif self.covar == 'MATERN32':
-            K = self.computeMatern(x1, x2, nu=1.5)
+            if self.use_context:
+                #input kernel matrix
+                x1_in = x1[:,0:self.input_dim]
+                x2_in = x2[:,0:self.input_dim]
+                K_in = self.computeMatern(x1_in, x2_in, self.input_ls, self.input_amp, nu=1.5)
+                #context kernel matrix
+                x1_c = x1[:,self.input_dim:self.active_dim]
+                x2_c = x2[:,self.input_dim:self.active_dim]
+                K_c = self.computeMatern(x1_c, x2_c, self.context_ls, self.context_amp, nu=1.5)
+                #addititive kernel matrix
+                K = K_in + K_c
+            else:
+                K = self.computeMatern(x1, x2, self.input_ls, self.input_amp, nu=1.5)
         
         elif self.covar == 'MATERN52':
-            K = self.computeMatern(x1, x2, nu=2.5)
+            if self.use_context:
+                #input kernel matrix
+                x1_in = x1[:,0:self.input_dim]
+                x2_in = x2[:,0:self.input_dim]
+                K_in = self.computeMatern(x1_in, x2_in, self.input_ls, self.input_amp, nu=2.5)
+                #context kernel matrix
+                x1_c = x1[:,self.input_dim:self.active_dim]
+                x2_c = x2[:,self.input_dim:self.active_dim]
+                K_c = self.computeMatern(x1_c, x2_c, self.context_ls, self.context_amp, nu=2.5)
+                #addititive kernel matrix
+                K = K_in + K_c
+            else:
+                K = self.computeMatern(x1, x2, self.input_ls, self.input_amp, nu=2.5)
         
         else: # default to rbf
             if np.size(np.shape(self.precisionMatrix)) == 2:
-                K = self.computeCBF(x1, x2)
+                if self.use_context:
+                    #input kernel matrix
+                    x1_in = x1[:,0:self.input_dim]
+                    x2_in = x2[:,0:self.input_dim]
+                    K_in = self.computeCBF(x1_in, x2_in, self.input_ls, self.input_amp)
+                    #context kernel matrix
+                    x1_c = x1[:,self.input_dim:self.active_dim]
+                    x2_c = x2[:,self.input_dim:self.active_dim]
+                    K_c = self.computeCBF(x1_c, x2_c, self.context_ls, self.context_amp)
+                    #addititive kernel matrix
+                    K = K_in + K_c
+                else:
+                    K = self.computeCBF(x1, x2, self.input_ls, self.input_amp)
             else:
-                K = self.computeRBF(x1, x2)
+                if self.use_context:
+                    #input kernel matrix
+                    x1_in = x1[:,0:self.input_dim]
+                    x2_in = x2[:,0:self.input_dim]
+                    K_in = self.computeRBF(x1_in, x2_in, self.input_ls, self.input_amp)
+                    #context kernel matrix
+                    x1_c = x1[:,self.input_dim:self.active_dim]
+                    x2_c = x2[:,self.input_dim:self.active_dim]
+                    K_c = self.computeRBF(x1_c, x2_c, self.context_ls, self.context_amp)
+                    #addititive kernel matrix
+                    K = K_in + K_c
+                else:
+                    K = self.computeRBF(x1, x2, self.input_ls, self.input_amp)
         if self.verboseQ:
             print('K',K) 
 
@@ -417,15 +486,14 @@ class OGP(object):
 
         return K
 
-    def computeRBF(self, x1, x2): 
+    def computeRBF(self, x1, x2, ls, amp):
         """
         radial basis function kernel
         """
         (n1, dim) = x1.shape
         n2 = x2.shape[0]
 
-        b = self.precisionMatrix
-        amp_covar = self.amplitude_covar
+        b = np.array(np.diag(ls**(-2)))
 
         # use precision matrix to scale
         b_sqrt = np.sqrt(b)
@@ -437,12 +505,12 @@ class OGP(object):
         
         K = -2 * np.dot(x1, x2.transpose())
         K = K + x1_sum_sq + x2_sum_sq
-        K = amp_covar * np.exp(-0.5 * K)
+        K = amp * np.exp(-0.5 * K)
 
         return K
 
     # updated to allow non-diagonal kernel matrix
-    def computeCBF(self, x1, x2):
+    def computeCBF(self, x1, x2, ls, amp):
         """
         correlated basis functions
         """
@@ -452,8 +520,7 @@ class OGP(object):
         if n1*n2 == 0:
             return np.array([])
 
-        b = self.precisionMatrix
-        amp_covar = self.amplitude_covar
+        b = np.array(np.diag(ls**(-2)))
      
         # save duplicate computations
         bdotx1T = np.array([np.dot(b,x.transpose()).transpose() for x in x1])
@@ -464,19 +531,18 @@ class OGP(object):
 
         K = -2 * np.dot(x1, bdotx2T.transpose())
         K = K + x1_sum_sq + x2_sum_sq
-        K = amp_covar * np.exp(-0.5 * K)
+        K = amp * np.exp(-0.5 * K)
 
         return K
 
-    def computeMatern(self, x1, x2, nu=2.5):
+    def computeMatern(self, x1, x2, ls, amp, nu=2.5):
         (n1, dim) = x1.shape
         n2 = x2.shape[0]
         
         if n1*n2 == 0:
             return np.array([])
 
-        b = self.precisionMatrix
-        amp_covar = self.amplitude_covar
+        b = np.array(np.diag(ls**(-2)))
         
         # save duplicate computations
         bdotx1T = np.array([np.dot(b,x.transpose()).transpose() for x in x1])
@@ -486,7 +552,7 @@ class OGP(object):
         x2_sum_sq = np.reshape(np.sum(x2 * bdotx2T, axis=1), (1,n2))
         
         dist_sq = x1_sum_sq - 2 * np.dot(x1, bdotx2T.transpose()) + x2_sum_sq
-        dist = np.sqrt(dist_sq + 1e-14)
+        dist = np.sqrt(dist_sq + 1e-10)
        
         if (nu == 1.5):
             poly = 1 + np.sqrt(3.0) * dist
@@ -495,7 +561,7 @@ class OGP(object):
         else:
             print('Invalid nu (only 1.5 and 2.5 supported)')
 
-        K = amp_covar * poly * np.exp(-np.sqrt(2 * nu) * dist)
+        K = amp * poly * np.exp(-np.sqrt(2 * nu) * dist)
 
         return K
         
