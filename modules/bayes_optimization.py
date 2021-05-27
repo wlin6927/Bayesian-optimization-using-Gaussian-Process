@@ -5,6 +5,7 @@ import operator as op
 import numpy as np
 # from scipy.stats import norm
 from scipy.optimize import minimize
+from sklearn.utils import check_random_state
 # from scipy.optimize import approx_fprime
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel as Ck, WhiteKernel
@@ -42,7 +43,7 @@ class BayesOpt:
         update the model.
     """
     
-    def __init__(self, model, target_func, acq_func='EI', xi=0.0, alt_param=-1, m=200, bounds=None, iter_bound=False, prior_data=None, start_dev_vals=None, dev_ids=None, searchBoundScaleFactor=None, optimize_kernel_on_the_fly = None, verboseQ=False):
+    def __init__(self, model, target_func, acq_func='EI', init_sample=20, xi=0.0, alt_param=-1, m=200, bounds=None, iter_bound=False, prior_data=None, start_dev_vals=None, dev_ids=None, searchBoundScaleFactor=None, optimize_kernel_on_the_fly = None, verboseQ=False):
         """        
         Initialization parameters:
         --------------------------
@@ -98,6 +99,7 @@ class BayesOpt:
             self.mi = self.target_func.mi
         except:
             self.mi = self.target_func
+        self.init_sample = init_sample
         self.acq_func = (acq_func, xi, alt_param)
         #self.ucb_params = [0.24, 0.4] # [nu,delta] worked well for LCLS
         self.ucb_params = [2., None] # if we want to used a fixed scale factor of the standard deviation
@@ -109,6 +111,7 @@ class BayesOpt:
         self.dev_ids = dev_ids
         self.start_dev_vals = start_dev_vals
         self.pvs = self.dev_ids
+        self.rng = check_random_state(42)
 
         try:
             # get initial state
@@ -312,13 +315,22 @@ class BayesOpt:
         """
         runs the optimizer for one iteration
         """
-        
+        if self.optimize_kernel_on_the_fly is None:
+            # get next point to try randomly for init_sample times
+            if len(self.X_obs) < self.init_sample:
+                x_next = self.rng.uniform(size=self.bounds.shape[0])                   * (self.bounds[:, 1] - self.bounds[:, 0]) + self.bounds[:, 0]
+            else:
+            # get next point to try using acquisition function
+                x_next = self.acquire()
+                if(self.acq_func[0] == 'testEI'):
+                    ind = x_next
+                    x_next = np.array(self.acq_func[2].iloc[ind,:-1],ndmin=2)
+        else:
         # get next point to try using acquisition function
-        x_next = self.acquire()
-        if(self.acq_func[0] == 'testEI'):
-            ind = x_next
-            x_next = np.array(self.acq_func[2].iloc[ind,:-1],ndmin=2)    
-        
+            x_next = self.acquire()
+            if(self.acq_func[0] == 'testEI'):
+                ind = x_next
+                x_next = np.array(self.acq_func[2].iloc[ind,:-1],ndmin=2)
         # change position of interface and get resulting y-value
         self.mi.setX(x_next)
         if(self.acq_func[0] == 'testEI'):
@@ -391,7 +403,7 @@ class BayesOpt:
             nsteps = 1
 
         # check to see if this is bounding step sizes
-        if(self.iter_bound or True):
+        if(self.iter_bound is True):
             if(self.bounds is None): # looks like a scale factor
                 self.bounds = 1.0
 
@@ -401,6 +413,7 @@ class BayesOpt:
             iter_bounds = np.transpose(np.array([x_start - bound_lengths, x_start + bound_lengths]))
 
         else:
+            relative_bounds = (np.array(self.bounds).T - x_curr).T
             iter_bounds = self.bounds
   
         # options for finding the peak of the acquisition function:
@@ -430,7 +443,7 @@ class BayesOpt:
         # gaussian process upper confidence bound acquisition function
         elif(self.acq_func[0] == 'UCB'):
             aqfcn = negUCB
-            fargs = (self.model, ndim, nsteps, self.ucb_params[0], self.ucb_params[1])
+            fargs = (self.bounds, self.model, ndim, nsteps, self.ucb_params[0], self.ucb_params[1])
 
         # maybe something mitch was using once? (can probably remove)
         elif(self.acq_func[0] == 'testEI'):
@@ -485,7 +498,6 @@ class BayesOpt:
                         v0s = copy.copy(vs)
                     else:
                         v0s = np.vstack((v0s,vs))
-
                 v0sort = v0s[:,-1].argsort()[:nkeep] # keep the nlargest
                 v0s = v0s[v0sort]
                 
@@ -554,7 +566,7 @@ def negExpImprove(x_new, model, y_best, xi,alpha = 1.0):
     return (alpha * (-EI) + (1. - alpha) * (-y_mean)).ravel()
 
 
-def negUCB(x_new, model, ndim, nsteps, nu = 1., delta = 1.):
+def negUCB(x_new, bounds, model, ndim, nsteps, nu = 1., delta = 1.):
     """
     GPUCB: Gaussian process upper confidence bound aquisition function
     Default nu and delta hyperparameters theoretically yield "least regret".
@@ -575,6 +587,8 @@ def negUCB(x_new, model, ndim, nsteps, nu = 1., delta = 1.):
     """
 
     if nsteps==0: nsteps += 1
+    if not np.all(np.logical_and(x_new >= np.array(bounds)[:, 0],                            x_new <= np.array(bounds)[:, 1])):
+        return np.array([np.inf])
     (y_mean, y_var) = model.predict(np.array(x_new,ndmin=2))
 #     print('(y_mean, y_var) = ',(y_mean, y_var))
     if delta is None:

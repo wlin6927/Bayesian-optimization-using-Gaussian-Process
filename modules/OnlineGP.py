@@ -471,19 +471,21 @@ class OGP(object):
     def computeMatern(self, x1, x2, nu=2.5):
         (n1, dim) = x1.shape
         n2 = x2.shape[0]
+        
+        if n1*n2 == 0:
+            return np.array([])
 
         b = self.precisionMatrix
         amp_covar = self.amplitude_covar
-
-        # use ARD to scale
-        b_sqrt = np.sqrt(b)
-        x1 = x1 * b_sqrt
-        x2 = x2 * b_sqrt
-
-        x1_sum_sq = np.reshape(np.sum(x1 * x1, axis=1), (n1, 1))
-        x2_sum_sq = np.reshape(np.sum(x2 * x2, axis=1), (1, n2))
-
-        dist_sq = x1_sum_sq  -2 * np.dot(x1, x2.transpose()) + x2_sum_sq
+        
+        # save duplicate computations
+        bdotx1T = np.array([np.dot(b,x.transpose()).transpose() for x in x1])
+        bdotx2T = np.array([np.dot(b,x.transpose()).transpose() for x in x2])
+        
+        x1_sum_sq = np.reshape(np.sum(x1 * bdotx1T, axis=1), (n1,1))
+        x2_sum_sq = np.reshape(np.sum(x2 * bdotx2T, axis=1), (1,n2))
+        
+        dist_sq = x1_sum_sq - 2 * np.dot(x1, bdotx2T.transpose()) + x2_sum_sq
         dist = np.sqrt(dist_sq + 1e-14)
        
         if (nu == 1.5):
